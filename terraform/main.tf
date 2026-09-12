@@ -102,8 +102,18 @@ resource "google_cloud_run_service" "qr_generator" {
   ]
 
   lifecycle {
+    # GitHub Actions (see .github/workflows/deploy.yml) rolls out new images with
+    # `gcloud run deploy`. Ignore the fields it manages so `terraform apply` never
+    # rolls a deployment back to var.image.
     ignore_changes = [
       metadata[0].annotations["run.googleapis.com/operation-id"],
+      metadata[0].annotations["run.googleapis.com/client-name"],
+      metadata[0].annotations["run.googleapis.com/client-version"],
+      template[0].metadata[0].name,
+      template[0].metadata[0].annotations["run.googleapis.com/client-name"],
+      template[0].metadata[0].annotations["run.googleapis.com/client-version"],
+      template[0].metadata[0].annotations["client.knative.dev/user-image"],
+      template[0].spec[0].containers[0].image,
     ]
   }
 }

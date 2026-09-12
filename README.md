@@ -75,6 +75,31 @@ This repo includes Terraform for Cloud Run. In production the app is configured 
 - `https://qr.maniak.io` → QR generator UI
 - `https://s.maniak.io/<code>` → short redirects
 
+### Continuous deployment
+
+Every push to `main` runs `.github/workflows/deploy.yml`, which builds the image, pushes it to Artifact Registry tagged with the commit SHA and `latest`, deploys it to the `qr-generator` Cloud Run service, and smoke-tests `/healthz`. It authenticates with Workload Identity Federation, so no service account keys are stored in GitHub.
+
+One-time setup:
+
+1. Apply the Terraform (it now creates the identity pool, provider and a `github-deployer` service account):
+
+   ```bash
+   cd terraform && terraform init && terraform apply
+   terraform output github_wif_provider
+   terraform output github_deploy_service_account
+   ```
+
+2. In the GitHub repo, go to **Settings → Secrets and variables → Actions → Variables** and add:
+
+   | Variable | Value |
+   | --- | --- |
+   | `GCP_WIF_PROVIDER` | output of `github_wif_provider` |
+   | `GCP_DEPLOY_SA` | output of `github_deploy_service_account` |
+   | `GCP_PROJECT_ID` | optional, defaults to `qr-maniak-io` |
+   | `GCP_REGION` | optional, defaults to `us-central1` |
+
+The workflow is skipped until `GCP_WIF_PROVIDER` is set. Terraform ignores the image and revision fields that the workflow manages, so a later `terraform apply` will not roll a deployment back. You can also trigger a deploy by hand from the Actions tab (**Run workflow**).
+
 ## Build the image manually
 
 ```bash
