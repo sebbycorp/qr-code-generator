@@ -1,0 +1,96 @@
+name: Deploy to Cloud Run
+
+# Builds the container from main, pushes it to Artifact Registry and rolls it out to the
+# Cloud Run service that Terraform created. Authentication uses Workload Identity Federation
+# (no long-lived keys) — see terraform/github-oidc.tf and README "Continuous deployment".
+#
+# Repository variables (Settings → Secrets and variables → Actions → Variables):
+#   GCP_WIF_PROVIDER  full resource name of the workload identity provider (terraform output github_wif_provider)
+#   GCP_DEPLOY_SA     email of the deployer service account          (terraform output github_deploy_service_account)
+#   GCP_PROJECT_ID    optional, defaults to qr-maniak-io
+#   GCP_REGION        optional, defaults to us-central1
+#
+# The job is skipped until GCP_WIF_PROVIDER is set, so merging is safe before GCP is wired up.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-cloud-run
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: ${{ vars.GCP_PROJECT_ID || 'qr-maniak-io' }}
+  REGION: ${{ vars.GCP_REGION || 'us-central1' }}
+  REPOSITORY: qr-app
+  IMAGE_NAME: qr-generator
+  SERVICE: qr-generator
+
+jobs:
+  deploy:
+    name: Build, push and deploy
+    if: ${{ vars.GCP_WIF_PROVIDER != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+      - name: Compute image tags
+        id: image
+        run: |
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/${IMAGE_NAME}"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=${IMAGE}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "latest_tag=${IMAGE}:latest" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        run: |
+          docker build \
+            --tag "${{ steps.image.outputs.sha_tag }}" \
+            --tag "${{ steps.image.outputs.latest_tag }}" \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            .
+
+      - name: Push image
+        run: |
+          docker push "${{ steps.image.outputs.sha_tag }}"
+          docker push "${{ steps.image.outputs.latest_tag }}"
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "${SERVICE}" \
+            --project "${PROJECT_ID}" \
+            --region "${REGION}" \
+            --image "${{ steps.image.outputs.sha_tag }}" \
+            --quiet
+
+      - name: Smoke test
+        run: |
+          URL="$(gcloud run services describe "${SERVICE}" --project "${PROJECT_ID}" --region "${REGION}" --format 'value(status.url)')"
+          echo "Service URL: ${URL}"
+          curl --fail --silent --show-error --retry 5 --retry-delay 3 "${URL}/healthz"
+          echo
+          curl --fail --silent --show-error --output /dev/null "${URL}/logos/kagent-mark.svg"
+          echo "Deployed ${{ steps.image.outputs.sha_tag }}" >> "$GITHUB_STEP_SUMMARY"
